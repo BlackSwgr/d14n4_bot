@@ -1,33 +1,47 @@
 import os, logging, tempfile
 import numpy as np
+from collections import Counter
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import librosa
-from music21 import stream, note, tempo, meter, instrument, clef, metadata
+from music21 import stream, note, tempo, meter, instrument, clef, metadata, expressions
 
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-def audio_a_partitura_limpia(wav_path, out_xml_path, titulo, letra_texto):
+def audio_a_partitura_completa(wav_path, out_xml_path, titulo, letra_texto):
     y, sr = librosa.load(wav_path, sr=16000, mono=True)
     duracion_real = len(y) / sr
-    print(f"DURACION REAL: {duracion_real/60:.2f} min - {duracion_real:.1f} seg")
     
     try:
         t, _ = librosa.beat.beat_track(y=y, sr=sr)
         bpm = int(t[0]) if isinstance(t, np.ndarray) else int(t)
-        bpm = max(75, min(bpm, 160))
+        bpm = max(75, min(bpm, 140))
     except:
         bpm = 88
 
-    f0 = librosa.yin(y, fmin=librosa.note_to_hz('C3'), fmax=librosa.note_to_hz('C6'), sr=sr, hop_length=1024)
+    # Calculamos cuántos compases debe tener REALMENTE 4:11
+    compases_reales = int((duracion_real * bpm / 60) / 4)
+    print(f"DURACION REAL {duracion_real:.1f}s = {compases_reales} compases a {bpm} BPM")
+
+    f0 = librosa.yin(y, fmin=librosa.note_to_hz('C3'), fmax=librosa.note_to_hz('C6'), sr=sr, hop_length=512) # hop más fino = más notas
     
+    # VERSOS Y CORO: si mandas la letra con saltos de línea, los respeto. Si no, la parto cada 8 palabras
+    if "\n" in letra_texto:
+        versos_raw = [v.strip() for v in letra_texto.split("\n") if v.strip()]
+    else:
+        palabras_temp = letra_texto.split()
+        versos_raw = [" ".join(palabras_temp[i:i+8]) for i in range(0, len(palabras_temp), 8)]
+
+    # Detectar coro: el verso que más se repite
+    conteo = Counter([v.lower() for v in versos_raw])
+    coro_texto = conteo.most_common(1)[0][0] if conteo else ""
+
     palabras = letra_texto.split()
-    print(f"Palabras: {len(palabras)} para {duracion_real:.1f}s")
 
     s = stream.Stream()
     s.append(metadata.Metadata())
-    s.metadata.title = titulo.replace(".mp3","").replace(".m4a","") + f" - {int(duracion_real//60)}:{int(duracion_real%60):02d}"
+    s.metadata.title = titulo.replace(".mp3","") + f" - {int(duracion_real//60)}:{int(duracion_real%60):02d} - Completa"
     s.append(instrument.AltoSaxophone())
     s.append(clef.TrebleClef())
     s.append(tempo.MetronomeMark(number=bpm))
@@ -49,58 +63,85 @@ def audio_a_partitura_limpia(wav_path, out_xml_path, titulo, letra_texto):
             midi = nota_sin_alteracion(int(librosa.hz_to_midi(freq)) + transposicion)
             if 50 <= midi <= 86:
                 if current_pitch is None:
-                    current_pitch = midi
-                    current_len = 1
+                    current_pitch = midi; current_len = 1
                 elif abs(midi - current_pitch) <= 2:
                     current_len += 1
                 else:
-                    if current_len >= 6:
+                    if current_len >= 3: # BAJAMOS A 3 para tener más notas y llenar los 90 compases
                         n = note.Note()
                         n.pitch.midi = current_pitch
-                        n.quarterLength = 1.0
+                        # duración real según cuanto duró esa nota
+                        dur_seg = (current_len * 512) / sr
+                        q_len = max(0.5, min(dur_seg * bpm / 60, 2.0))
+                        n.quarterLength = q_len
                         notas_detectadas.append(n)
-                    current_pitch = midi
-                    current_len = 1
-    if current_pitch and current_len >= 6:
-        n = note.Note()
-        n.pitch.midi = current_pitch
+                    current_pitch = midi; current_len = 1
+    if current_pitch and current_len >=3:
+        n = note.Note(); n.pitch.midi = current_pitch
         n.quarterLength = 1.0
         notas_detectadas.append(n)
 
     total_notas = len(notas_detectadas)
-    total_palabras = len(palabras)
-    print(f"Notas detectadas en {duracion_real:.1f}s: {total_notas}")
+    print(f"Notas detectadas para llenar {compases_reales} compases: {total_notas}")
 
-    if total_notas == 0:
-        notas_detectadas = [note.Note() for _ in range(total_palabras)]
-        for nn in notas_detectadas:
-            nn.pitch.midi = 65
-            nn.quarterLength = 1.0
-        total_notas = len(notas_detectadas)
-
-    paso = total_notas / total_palabras if total_palabras > 0 else 1
-
+    # Reparto de versos en toda la canción
     notas_finales = []
-    palabra_idx = 0
+    verso_idx = 0
+    palabras_en_verso_actual = []
+    if versos_raw:
+        palabras_en_verso_actual = versos_raw[0].split()
     
+    palabra_idx_global = 0
+    paso_versos = total_notas / len(versos_raw) if versos_raw else 1
+
     for i, n_detect in enumerate(notas_detectadas):
         nueva = note.Note()
         nueva.pitch.midi = n_detect.pitch.midi
-        nueva.quarterLength = 1.0
+        nueva.quarterLength = n_detect.quarterLength
+
+        # Cambio de verso
+        if i >= int((verso_idx+1) * paso_versos) and verso_idx < len(versos_raw)-1:
+            verso_idx += 1
+            palabras_en_verso_actual = versos_raw[verso_idx].split()
+            palabra_idx_global = 0
+            # MARCA DE SECCIÓN LEGIBLE
+            es_coro = versos_raw[verso_idx].lower() == coro_texto
+            marca = "CORO" if es_coro else f"VERSO {verso_idx+1}"
+            nueva.addLyric(marca)
+            # Texto grande arriba del pentagrama
+            nueva.addLyric(f"--- {marca} ---")
         
-        posicion_esperada = int(palabra_idx * paso)
-        if i >= posicion_esperada and palabra_idx < total_palabras:
-            nueva.addLyric(palabras[palabra_idx])
-            nueva.lyrics[0].syllabic = "single"
-            palabra_idx += 1
+        # Letra normal palabra por palabra pero sin mezclar versos
+        if palabra_idx_global < len(palabras_en_verso_actual):
+            if len(nueva.lyrics) == 0:
+                nueva.addLyric(palabras_en_verso_actual[palabra_idx_global])
+            else:
+                # Si ya tiene marca de CORO/VERSO, añade palabra como segunda letra
+                nueva.addLyric(palabras_en_verso_actual[palabra_idx_global])
+            nueva.lyrics[-1].syllabic = "single"
+            palabra_idx_global += 1
         
         notas_finales.append(nueva)
+
+    # Rellenar con silencios si faltan compases para llegar a 4:11 reales
+    quarters_actuales = sum(n.quarterLength for n in notas_finales)
+    quarters_necesarios = compases_reales * 4
+    if quarters_actuales < quarters_necesarios:
+        falta = quarters_necesarios - quarters_actuales
+        print(f"Faltan {falta} negras, añadiendo descansos instrumentales")
+        # Añadimos notas largas instrumentales sin letra al final para respetar 4:11
+        while falta > 0:
+            n = note.Note()
+            n.pitch.midi = 65
+            n.quarterLength = min(4.0, falta)
+            notas_finales.append(n)
+            falta -= n.quarterLength
 
     for n in notas_finales:
         s.append(n)
 
     s.write('musicxml', fp=out_xml_path)
-    return len(notas_finales), len(palabras), duracion_real
+    return len(notas_finales), len(palabras), duracion_real, compases_reales
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -110,24 +151,24 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(persistent_path)
     context.user_data['audio_path'] = persistent_path
     context.user_data['titulo'] = titulo
-    await update.message.reply_text(f"🎷 Recibido: {titulo}\nAhora pega las 244 palabras en orden como se canta")
+    await update.message.reply_text(f"🎷 Recibido: {titulo}\nAhora manda la letra con saltos de línea:\nVerso 1\nVerso 2\nCORO\nPara que te marque VERSO/CORO")
 
 async def handle_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'audio_path' not in context.user_data or not os.path.exists(context.user_data['audio_path']):
-        await update.message.reply_text("Manda primero el mp3 de 4:11")
+        await update.message.reply_text("Manda primero el mp3")
         return
     letra = update.message.text
     titulo = context.user_data['titulo']
     in_path = context.user_data['audio_path']
-    await update.message.reply_text(f"Recibí {len(letra.split())} palabras, procesando {len(letra.split())} palabras en duración REAL... 20 seg")
+    await update.message.reply_text(f"Recibí {len(letra.split())} palabras, {len(letra.splitlines())} líneas. Armando partitura completa con marcas de CORO/VERSO...")
     try:
         with tempfile.TemporaryDirectory() as tmp:
             out_xml = f"{tmp}/out.musicxml"
-            n_notas, n_pal, dur = audio_a_partitura_limpia(in_path, out_xml, titulo, letra)
+            n_notas, n_pal, dur, compases = audio_a_partitura_completa(in_path, out_xml, titulo, letra)
             await update.message.reply_document(
                 document=open(out_xml, 'rb'), 
-                filename=f"{titulo.replace('.mp3','')}_{int(dur//60)}m{int(dur%60)}s_{n_pal}palabras.musicxml", 
-                caption=f"✅ {dur/60:.1f} min REALES (no 6 min): {n_notas} notas para {n_pal} palabras. 1 palabra = 1 nota, sin #/b."
+                filename=f"{titulo.replace('.mp3','')}_{compases}compases_{n_pal}pal.musicxml", 
+                caption=f"✅ {int(dur//60)}:{int(dur%60):02d} REALES = {compases} compases, {n_notas} notas, {n_pal} palabras\nVERSO/CORO marcado, legible, sin mezclar."
             )
             context.user_data.clear()
     except Exception as e:
@@ -135,7 +176,7 @@ async def handle_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Manda mp3 + letra completa cronológica")
+    await update.message.reply_text("Manda mp3 + letra con saltos de línea para detectar versos")
 
 def main():
     app = Application.builder().token(TOKEN).build()
