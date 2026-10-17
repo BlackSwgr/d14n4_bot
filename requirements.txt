@@ -4,5 +4,3 @@ librosa
 music21
 soundfile
 numpy
-openai-whisper
-torch --index-url https://download.pytorch.org/whl/cpu
