@@ -27,15 +27,78 @@ def dividir_palavra(palavra, n_silabas):
     return partes
 
 def audio_a_partitura_fast(wav_path, out_xml_path, titulo, letra_texto):
-    # ULTRA FAST para 6 min: sr=16000 y yin
     y, sr = librosa.load(wav_path, sr=16000, mono=True)
-    print(f"Audio {len(y)/sr/60:.1f} min cargado, sr={sr}")
     try:
         t, _ = librosa.beat.beat_track(y=y, sr=sr)
         bpm = int(t[0]) if isinstance(t, np.ndarray) else int(t)
         bpm = max(70, min(bpm, 170))
     except:
         bpm = 151
+
+    f0 = librosa.yin(y, fmin=librosa.note_to_hz('C3'), fmax=librosa.note_to_hz('C7'), sr=sr, hop_length=512)
+    
+    palabras = letra_texto.split()
+    s = stream.Stream()
+    s.append(metadata.Metadata())
+    s.metadata.title = titulo.replace(".mp3","").replace(".m4a","") + " - Completa 6min"
+    s.append(instrument.AltoSaxophone())
+    s.append(clef.TrebleClef())
+    s.append(tempo.MetronomeMark(number=bpm))
+    s.append(meter.TimeSignature('4/4'))
+
+    notas = []
+    transposicion = 21
+    current_pitch = None
+    current_len = 0
+    for freq in f0:
+        if not np.isnan(freq):
+            midi = int(librosa.hz_to_midi(freq)) + transposicion
+            if 50 <= midi <= 86:
+                if current_pitch is None:
+                    current_pitch = midi
+                    current_len = 1
+                elif abs(midi - current_pitch) <= 1:
+                    current_len += 1
+                else:
+                    if current_len >= 3:
+                        n = note.Note()
+                        n.pitch.midi = current_pitch
+                        # FIX: Duraciones solo expresables en MusicXML (0.5, 1, 1.5, 2)
+                        n.quarterLength = 1.0 
+                        notas.append(n)
+                    current_pitch = midi
+                    current_len = 1
+    if current_pitch and current_len >=3:
+        n = note.Note()
+        n.pitch.midi = current_pitch
+        n.quarterLength = 1.0
+        notas.append(n)
+
+    if len(notas) < len(palabras)*2 and len(notas) > 10:
+        notas = notas * 2
+
+    note_idx = 0
+    for palabra in palabras:
+        if note_idx >= len(notas): break
+        n_silabas = contar_silabas_pt(palabra)
+        silabas = dividir_palavra(palabra, n_silabas)
+        for j in range(n_silabas):
+            if note_idx >= len(notas): break
+            n = notas[note_idx]
+            # FIX: asegurar que todas las notas tengan duración válida
+            n.quarterLength = 1.0 if n_silabas == 1 else 0.5
+            n.addLyric(silabas[j] if j < len(silabas) else palabra)
+            n.lyrics[-1].syllabic = "single" if n_silabas==1 else "begin" if j==0 else "end" if j==n_silabas-1 else "middle"
+            note_idx += 1
+
+    # FIX: MusicXML no acepta duraciones raras, ya todas son 0.5 y 1.0
+    for n in notas:
+        if n.quarterLength not in [0.5, 1.0, 1.5, 2.0, 4.0]:
+            n.quarterLength = 1.0
+        s.append(n)
+
+    s.write('musicxml', fp=out_xml_path)
+    return len(notas), len(palabras)
 
     # YIN es 10x más rápido que PYIN para 6 min
     f0 = librosa.yin(y, fmin=librosa.note_to_hz('C3'), fmax=librosa.note_to_hz('C7'), sr=sr, hop_length=512)
