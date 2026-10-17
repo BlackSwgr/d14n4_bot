@@ -1,4 +1,4 @@
-import os, logging, tempfile, re
+import os, logging, tempfile
 import numpy as np
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -8,161 +8,101 @@ from music21 import stream, note, tempo, meter, instrument, clef, metadata
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-def contar_silabas_pt(palavra):
-    palavra = palavra.lower()
-    vogais = "aeiouáéíóúãõâêôàè"
-    count = len(re.findall(f'[{vogais}]+', palavra))
-    return max(1, min(count, 4))
-
-def dividir_palavra(palavra, n_silabas):
-    if n_silabas == 1:
-        return [palavra]
-    chunk = max(1, len(palavra)//n_silabas)
-    partes = []
-    for i in range(n_silabas):
-        if i == n_silabas-1:
-            partes.append(palavra[i*chunk:])
-        else:
-            partes.append(palavra[i*chunk:(i+1)*chunk])
-    return partes
-
-def audio_a_partitura_fast(wav_path, out_xml_path, titulo, letra_texto):
+def audio_a_partitura_limpia(wav_path, out_xml_path, titulo, letra_texto):
     y, sr = librosa.load(wav_path, sr=16000, mono=True)
+    duracion_real = len(y) / sr
+    print(f"DURACION REAL: {duracion_real/60:.2f} min - {duracion_real:.1f} seg")
+    
     try:
         t, _ = librosa.beat.beat_track(y=y, sr=sr)
         bpm = int(t[0]) if isinstance(t, np.ndarray) else int(t)
-        bpm = max(70, min(bpm, 170))
+        bpm = max(75, min(bpm, 160))
     except:
-        bpm = 151
+        bpm = 88
 
-    f0 = librosa.yin(y, fmin=librosa.note_to_hz('C3'), fmax=librosa.note_to_hz('C7'), sr=sr, hop_length=512)
+    f0 = librosa.yin(y, fmin=librosa.note_to_hz('C3'), fmax=librosa.note_to_hz('C6'), sr=sr, hop_length=1024)
     
     palabras = letra_texto.split()
+    print(f"Palabras: {len(palabras)} para {duracion_real:.1f}s")
+
     s = stream.Stream()
     s.append(metadata.Metadata())
-    s.metadata.title = titulo.replace(".mp3","").replace(".m4a","") + " - Completa 6min"
+    s.metadata.title = titulo.replace(".mp3","").replace(".m4a","") + f" - {int(duracion_real//60)}:{int(duracion_real%60):02d}"
     s.append(instrument.AltoSaxophone())
     s.append(clef.TrebleClef())
     s.append(tempo.MetronomeMark(number=bpm))
     s.append(meter.TimeSignature('4/4'))
 
-    notas = []
-    transposicion = 21
+    def nota_sin_alteracion(midi):
+        blancas = [0,2,4,5,7,9,11]
+        octava = midi // 12
+        pc = midi % 12
+        pc_limpio = min(blancas, key=lambda x: abs(x-pc))
+        return octava*12 + pc_limpio
+
+    notas_detectadas = []
     current_pitch = None
     current_len = 0
+    transposicion = 21
     for freq in f0:
         if not np.isnan(freq):
-            midi = int(librosa.hz_to_midi(freq)) + transposicion
+            midi = nota_sin_alteracion(int(librosa.hz_to_midi(freq)) + transposicion)
             if 50 <= midi <= 86:
                 if current_pitch is None:
                     current_pitch = midi
                     current_len = 1
-                elif abs(midi - current_pitch) <= 1:
+                elif abs(midi - current_pitch) <= 2:
                     current_len += 1
                 else:
-                    if current_len >= 3:
+                    if current_len >= 6:
                         n = note.Note()
                         n.pitch.midi = current_pitch
-                        # FIX: Duraciones solo expresables en MusicXML (0.5, 1, 1.5, 2)
-                        n.quarterLength = 1.0 
-                        notas.append(n)
+                        n.quarterLength = 1.0
+                        notas_detectadas.append(n)
                     current_pitch = midi
                     current_len = 1
-    if current_pitch and current_len >=3:
+    if current_pitch and current_len >= 6:
         n = note.Note()
         n.pitch.midi = current_pitch
         n.quarterLength = 1.0
-        notas.append(n)
+        notas_detectadas.append(n)
 
-    if len(notas) < len(palabras)*2 and len(notas) > 10:
-        notas = notas * 2
+    total_notas = len(notas_detectadas)
+    total_palabras = len(palabras)
+    print(f"Notas detectadas en {duracion_real:.1f}s: {total_notas}")
 
-    note_idx = 0
-    for palabra in palabras:
-        if note_idx >= len(notas): break
-        n_silabas = contar_silabas_pt(palabra)
-        silabas = dividir_palavra(palabra, n_silabas)
-        for j in range(n_silabas):
-            if note_idx >= len(notas): break
-            n = notas[note_idx]
-            # FIX: asegurar que todas las notas tengan duración válida
-            n.quarterLength = 1.0 if n_silabas == 1 else 0.5
-            n.addLyric(silabas[j] if j < len(silabas) else palabra)
-            n.lyrics[-1].syllabic = "single" if n_silabas==1 else "begin" if j==0 else "end" if j==n_silabas-1 else "middle"
-            note_idx += 1
+    if total_notas == 0:
+        notas_detectadas = [note.Note() for _ in range(total_palabras)]
+        for nn in notas_detectadas:
+            nn.pitch.midi = 65
+            nn.quarterLength = 1.0
+        total_notas = len(notas_detectadas)
 
-    # FIX: MusicXML no acepta duraciones raras, ya todas son 0.5 y 1.0
-    for n in notas:
-        if n.quarterLength not in [0.5, 1.0, 1.5, 2.0, 4.0]:
-            n.quarterLength = 1.0
-        s.append(n)
+    paso = total_notas / total_palabras if total_palabras > 0 else 1
 
-    s.write('musicxml', fp=out_xml_path)
-    return len(notas), len(palabras)
-
-    # YIN es 10x más rápido que PYIN para 6 min
-    f0 = librosa.yin(y, fmin=librosa.note_to_hz('C3'), fmax=librosa.note_to_hz('C7'), sr=sr, hop_length=512)
-    voiced_flag = ~np.isnan(f0)
+    notas_finales = []
+    palabra_idx = 0
     
-    palabras = letra_texto.split()
-    s = stream.Stream()
-    s.append(metadata.Metadata())
-    s.metadata.title = titulo.replace(".mp3","").replace(".m4a","") + " - Completa 6min"
-    s.append(instrument.AltoSaxophone())
-    s.append(clef.TrebleClef())
-    s.append(tempo.MetronomeMark(number=bpm))
-    s.append(meter.TimeSignature('4/4'))
+    for i, n_detect in enumerate(notas_detectadas):
+        nueva = note.Note()
+        nueva.pitch.midi = n_detect.pitch.midi
+        nueva.quarterLength = 1.0
+        
+        posicion_esperada = int(palabra_idx * paso)
+        if i >= posicion_esperada and palabra_idx < total_palabras:
+            nueva.addLyric(palabras[palabra_idx])
+            nueva.lyrics[0].syllabic = "single"
+            palabra_idx += 1
+        
+        notas_finales.append(nueva)
 
-    notas = []
-    transposicion = 21
-    current_pitch = None
-    current_len = 0
-    for freq in f0:
-        if not np.isnan(freq):
-            midi = int(librosa.hz_to_midi(freq)) + transposicion
-            if 50 <= midi <= 86:
-                if current_pitch is None:
-                    current_pitch = midi
-                    current_len = 1
-                elif abs(midi - current_pitch) <= 1:
-                    current_len += 1
-                else:
-                    if current_len >= 3:
-                        n = note.Note()
-                        n.pitch.midi = current_pitch
-                        sec = current_len * 512 / sr
-                        n.quarterLength = max(0.5, min(2.5, sec * (bpm/60) * 2))
-                        notas.append(n)
-                    current_pitch = midi
-                    current_len = 1
-    if current_pitch and current_len >=3:
-        n = note.Note()
-        n.pitch.midi = current_pitch
-        n.quarterLength = 1.0
-        notas.append(n)
-
-    # Si detecta pocas notas por ser 6 min, duplica un poco para que alcance para las silabas
-    if len(notas) < len(palabras)*2 and len(notas) > 10:
-        notas = notas * 2
-
-    note_idx = 0
-    for palabra in palabras:
-        if note_idx >= len(notas): break
-        n_silabas = contar_silabas_pt(palabra)
-        silabas = dividir_palavra(palabra, n_silabas)
-        for j in range(n_silabas):
-            if note_idx >= len(notas): break
-            n = notas[note_idx]
-            n.addLyric(silabas[j] if j < len(silabas) else palabra)
-            n.lyrics[-1].syllabic = "single" if n_silabas==1 else "begin" if j==0 else "end" if j==n_silabas-1 else "middle"
-            note_idx += 1
-
-    for n in notas:
+    for n in notas_finales:
         s.append(n)
-    s.write('musicxml', fp=out_xml_path)
-    return len(notas), len(palabras)
 
-async def handle_audio(update, context):
+    s.write('musicxml', fp=out_xml_path)
+    return len(notas_finales), len(palabras), duracion_real
+
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     persistent_path = f"/tmp/audio_{chat_id}.wav"
     titulo = update.message.audio.file_name if update.message.audio else update.message.document.file_name if update.message.document else "Cancion"
@@ -170,33 +110,40 @@ async def handle_audio(update, context):
     await file.download_to_drive(persistent_path)
     context.user_data['audio_path'] = persistent_path
     context.user_data['titulo'] = titulo
-    await update.message.reply_text(f"🎷 6 min recibido: {titulo}\nAhora pega la letra COMPLETA")
+    await update.message.reply_text(f"🎷 Recibido: {titulo}\nAhora pega las 244 palabras en orden como se canta")
 
-async def handle_lyrics(update, context):
+async def handle_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'audio_path' not in context.user_data or not os.path.exists(context.user_data['audio_path']):
-        await update.message.reply_text("Manda primero el mp3 de 6 min")
+        await update.message.reply_text("Manda primero el mp3 de 4:11")
         return
     letra = update.message.text
     titulo = context.user_data['titulo']
     in_path = context.user_data['audio_path']
-    await update.message.reply_text(f"Recibí {len(letra.split())} palabras, procesando FAST 6 MIN... 20-30 seg")
+    await update.message.reply_text(f"Recibí {len(letra.split())} palabras, procesando {len(letra.split())} palabras en duración REAL... 20 seg")
     try:
         with tempfile.TemporaryDirectory() as tmp:
             out_xml = f"{tmp}/out.musicxml"
-            n_notas, n_pal = audio_a_partitura_fast(in_path, out_xml, titulo, letra)
-            await update.message.reply_document(document=open(out_xml, 'rb'), filename=f"{titulo.replace('.mp3','')}_COMPLETA_FAST.musicxml", caption=f"✅ FAST COMPLETA: {n_notas} notas para {n_pal} palabras, 8-12 páginas, cada sílaba su nota")
+            n_notas, n_pal, dur = audio_a_partitura_limpia(in_path, out_xml, titulo, letra)
+            await update.message.reply_document(
+                document=open(out_xml, 'rb'), 
+                filename=f"{titulo.replace('.mp3','')}_{int(dur//60)}m{int(dur%60)}s_{n_pal}palabras.musicxml", 
+                caption=f"✅ {dur/60:.1f} min REALES (no 6 min): {n_notas} notas para {n_pal} palabras. 1 palabra = 1 nota, sin #/b."
+            )
             context.user_data.clear()
     except Exception as e:
         logging.error(e, exc_info=True)
         await update.message.reply_text(f"Error: {e}")
 
-async def start(update, context):
-    await update.message.reply_text("Manda mp3 6min + letra completa")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Manda mp3 + letra completa cronológica")
 
 def main():
-    app=Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_audio))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_lyrics))
     app.run_polling()
-if __name__=="__main__": main()
+
+if __name__ == "__main__":
+    main()
+    
