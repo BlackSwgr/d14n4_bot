@@ -3,26 +3,40 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import yt_dlp, librosa
 from music21 import stream, note, tempo, meter, instrument, clef, metadata
+import whisper
 
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+# Cargamos modelo tiny (rápido y no traduce, deja el idioma original)
+WHISPER_MODEL = whisper.load_model("tiny")
 
 def audio_a_partitura(wav_path, out_xml_path, titulo="Cancion"):
-    y, sr = librosa.load(wav_path, sr=22050, duration=60)
+    y, sr = librosa.load(wav_path, sr=22050, duration=90)
     try:
         tv, _ = librosa.beat.beat_track(y=y, sr=sr)
         bpm = int(tv[0]) if isinstance(tv, np.ndarray) else int(tv)
     except:
-        bpm = 75
+        bpm = 80
+
+    # 1. SACAR LETRA REAL SIN TRADUCIR
+    print("Transcribiendo letra...")
+    result = WHISPER_MODEL.transcribe(wav_path, language=None) # None = detecta idioma auto, no traduce
+    letra_completa = result["text"]
+    palabras = letra_completa.split()
+    print(f"Letra detectada: {letra_completa[:100]}")
+
     f0, voiced_flag, _ = librosa.pyin(y, fmin=librosa.note_to_hz('C3'), fmax=librosa.note_to_hz('C7'))
     s = stream.Stream()
     s.append(metadata.Metadata())
     s.metadata.title = titulo
+    s.metadata.lyricist = letra_completa[:200] # guarda letra completa en info
     s.append(instrument.AltoSaxophone())
     s.append(clef.TrebleClef())
     s.append(tempo.MetronomeMark(number=bpm))
     s.append(meter.TimeSignature('4/4'))
+
     transposicion = 21
+    notas = []
     last_midi = None
     for i in range(0, len(f0), 20):
         if i < len(voiced_flag) and voiced_flag[i] and f0[i]:
@@ -31,25 +45,35 @@ def audio_a_partitura(wav_path, out_xml_path, titulo="Cancion"):
                 n = note.Note()
                 n.pitch.midi = midi
                 n.quarterLength = 1.0
-                s.append(n)
+                notas.append(n)
                 last_midi = midi
-    s.write('musicxml', fp=out_xml_path)
 
-async def start(update, context):
-    await update.message.reply_text("Manda audio/mp3 y te doy partitura en Clave de Sol para sax alto Eb")
+    # 2. COLOCAR UNA PALABRA POR NOTA
+    for idx, n in enumerate(notas):
+        if idx < len(palabras):
+            n.addLyric(palabras[idx]) # Aquí se pone la letra debajo del pentagrama
+        s.append(n)
+
+    s.write('musicxml', fp=out_xml_path)
+    return letra_completa
 
 async def handle_audio(update, context):
     titulo = update.message.audio.file_name if update.message.audio else update.message.document.file_name if update.message.document else "Audio"
-    await update.message.reply_text(f"🎷 Analizando {titulo}... clave de Sol")
+    await update.message.reply_text(f"🎷 Transcribiendo letra original + notas de {titulo}... tarda 1-2 min la primera vez")
     try:
         file = await update.message.effective_attachment.get_file()
         with tempfile.TemporaryDirectory() as tmp:
             in_path = f"{tmp}/input"; out_xml = f"{tmp}/out.musicxml"
             await file.download_to_drive(in_path)
-            audio_a_partitura(in_path, out_xml, titulo=titulo)
-            await update.message.reply_document(document=open(out_xml, 'rb'), filename=f"{titulo}_SaxAlto_Eb.musicxml")
+            letra = audio_a_partitura(in_path, out_xml, titulo=titulo)
+            await update.message.reply_text(f"Letra detectada (sin traducir):\n{letra[:500]}")
+            await update.message.reply_document(document=open(out_xml, 'rb'), filename=f"{titulo}_SaxAlto_Eb_CON_LETRA.musicxml", caption="✅ Con letra debajo de cada nota")
     except Exception as e:
-        logging.error(e); await update.message.reply_text(f"Error: {e}")
+        logging.error(e, exc_info=True)
+        await update.message.reply_text(f"Error: {e}")
+
+async def start(update, context):
+    await update.message.reply_text("Manda audio y te doy partitura con letra original debajo de cada nota")
 
 async def partitura(update, context):
     if not context.args: await update.message.reply_text("Usa /partitura link"); return
@@ -59,8 +83,8 @@ async def partitura(update, context):
             ydl_opts={'format':'bestaudio/best','outtmpl':f'{tmp}/audio.%(ext)s','postprocessors':[{'key':'FFmpegExtractAudio','preferredcodec':'wav','preferredquality':'192'}],'quiet':True,'noplaylist':True,'extractor_args':{'youtube':{'player_client':['android']}},}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info=ydl.extract_info(url, download=True); titulo=info.get('title','Cancion')
-            audio_a_partitura(f"{tmp}/audio.wav", f"{tmp}/out.musicxml", titulo=titulo)
-            await update.message.reply_document(document=open(f"{tmp}/out.musicxml",'rb'), filename=f"{titulo}.musicxml")
+            letra = audio_a_partitura(f"{tmp}/audio.wav", f"{tmp}/out.musicxml", titulo=titulo)
+            await update.message.reply_document(document=open(f"{tmp}/out.musicxml",'rb'), filename=f"{titulo}_con_letra.musicxml")
     except Exception as e:
         logging.error(e); await update.message.reply_text(f"Error: {e}")
 

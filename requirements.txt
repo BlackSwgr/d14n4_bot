@@ -4,3 +4,4 @@ librosa
 music21
 numpy
 soundfile
+openai-whisper
