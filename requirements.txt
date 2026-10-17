@@ -1,7 +1,8 @@
-python-telegram-bot==21.9
+python-telegram-bot==20.7
 yt-dlp
 librosa
 music21
-numpy
 soundfile
+numpy
 openai-whisper
+torch --index-url https://download.pytorch.org/whl/cpu
