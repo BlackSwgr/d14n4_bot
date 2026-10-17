@@ -28,14 +28,18 @@ async def partitura(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            # 1. Bajar audio de YouTube tal cual
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': f'{tmp}/audio.%(ext)s',
-                'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'wav'}],
-                'quiet': True,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            #ydl_opts = {
+    'format': 'bestaudio/best',
+    'outtmpl': f'{tmp}/audio.%(ext)s',
+    'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'wav','preferredquality': '192'}],
+    'quiet': True,
+    'noplaylist': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web']
+        }
+    }               
+           with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
             
             wav_path = f"{tmp}/audio.wav"
