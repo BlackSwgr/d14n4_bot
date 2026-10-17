@@ -1,2 +1,6 @@
 python-telegram-bot==21.9
-reportlab
+yt-dlp
+librosa
+music21
+numpy
+soundfile
