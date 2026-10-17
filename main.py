@@ -5,7 +5,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hola muñeca 💅 Ya estoy prendida!")
+    await update.message.reply_text("Hola hermanos míos, bienvenidos a este programa, sigue en desarrollo pero espero que sea de su agrado 🙏")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Me dijiste: {update.message.text}")
