@@ -1,4 +1,5 @@
-import os, logging, tempfile, numpy as np
+import os, logging, tempfile
+import numpy as np
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import librosa
@@ -14,18 +15,15 @@ def audio_a_partitura(wav_path, out_xml_path, titulo, letra_texto):
         bpm = int(tv[0]) if isinstance(tv, np.ndarray) else int(tv)
     except:
         bpm = 151
-
     palabras = letra_texto.split()
-    
     f0, voiced_flag, _ = librosa.pyin(y, fmin=librosa.note_to_hz('C3'), fmax=librosa.note_to_hz('C7'))
     s = stream.Stream()
     s.append(metadata.Metadata())
-    s.metadata.title = titulo.replace(".mp3","")
+    s.metadata.title = titulo.replace(".mp3","").replace(".m4a","")
     s.append(instrument.AltoSaxophone())
     s.append(clef.TrebleClef())
     s.append(tempo.MetronomeMark(number=bpm))
     s.append(meter.TimeSignature('4/4'))
-
     transposicion = 21
     notas = []
     last_midi = None
@@ -38,45 +36,45 @@ def audio_a_partitura(wav_path, out_xml_path, titulo, letra_texto):
                 n.quarterLength = 1.0
                 notas.append(n)
                 last_midi = midi
-
     for idx, n in enumerate(notas):
         if idx < len(palabras):
             n.addLyric(palabras[idx])
         s.append(n)
-
     s.write('musicxml', fp=out_xml_path)
     return len(notas)
 
-async def handle_audio(update, context):
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    # Guardado PERSISTENTE, no se borra
+    persistent_path = f"/tmp/audio_{chat_id}.wav"
+    titulo = update.message.audio.file_name if update.message.audio else update.message.document.file_name if update.message.document else "Cancion"
     file = await update.message.effective_attachment.get_file()
-    with tempfile.TemporaryDirectory() as tmp:
-        in_path = f"{tmp}/input"
-        await file.download_to_drive(in_path)
-        context.user_data['audio_path'] = in_path
-        context.user_data['titulo'] = update.message.audio.file_name if update.message.audio else update.message.document.file_name if update.message.document else "Cancion"
-        await update.message.reply_text(f"🎷 Audio recibido: {context.user_data['titulo']}\n\nAhora PÉGAME la letra completa tal cual (en portugués, sin traducir) en un solo mensaje y te genero la partitura con cada palabra debajo de su nota.")
+    await file.download_to_drive(persistent_path)
+    context.user_data['audio_path'] = persistent_path
+    context.user_data['titulo'] = titulo
+    await update.message.reply_text(f"🎷 Audio recibido: {titulo}\nAhora pega la letra completa (las 60 palabras) y te genero la partitura CON letra debajo.")
 
-async def handle_lyrics(update, context):
-    if 'audio_path' not in context.user_data:
+async def handle_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'audio_path' not in context.user_data or not os.path.exists(context.user_data['audio_path']):
+        await update.message.reply_text("Primero manda el mp3, luego la letra.")
         return
     letra = update.message.text
     titulo = context.user_data['titulo']
-    await update.message.reply_text(f"Recibí letra de {len(letra.split())} palabras, generando partitura...")
+    in_path = context.user_data['audio_path']
+    await update.message.reply_text(f"Recibí {len(letra.split())} palabras, generando...")
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            import shutil
-            in_path = f"{tmp}/input"
-            shutil.copy(context.user_data['audio_path'], in_path)
             out_xml = f"{tmp}/out.musicxml"
             num = audio_a_partitura(in_path, out_xml, titulo, letra)
-            await update.message.reply_document(document=open(out_xml, 'rb'), filename=f"{titulo.replace('.mp3','')}_CON_LETRA.musicxml", caption=f"✅ {num} notas con letra original debajo")
+            await update.message.reply_document(document=open(out_xml, 'rb'), filename=f"{titulo.replace('.mp3','')}_CON_LETRA.musicxml", caption=f"✅ {num} notas con letra original")
+            # Limpiar
             context.user_data.clear()
     except Exception as e:
         logging.error(e, exc_info=True)
         await update.message.reply_text(f"Error: {e}")
 
 async def start(update, context):
-    await update.message.reply_text("1. Manda el mp3\n2. Luego pega la letra completa")
+    await update.message.reply_text("1. Manda mp3 2. Pega letra")
 
 def main():
     app=Application.builder().token(TOKEN).build()
@@ -85,5 +83,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_lyrics))
     app.run_polling()
 if __name__=="__main__": main()
+
 
 
