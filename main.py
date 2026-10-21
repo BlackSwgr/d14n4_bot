@@ -148,7 +148,7 @@ async def handle_lyrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     letra = update.message.text
     titulo = context.user_data['titulo']
     in_path = context.user_data['audio_path']
-    await update.message.reply_text(f"Recibí {len(letra.split())} palabras. Generando sin notas volando...")
+    await update.message.reply_text(f"Recibí {len(letra.split())} palabras. Generando...")
     try:
         with tempfile.TemporaryDirectory() as tmp:
             out_xml = f"{tmp}/out.musicxml"
